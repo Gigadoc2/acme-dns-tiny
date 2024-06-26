@@ -59,7 +59,7 @@ def get_crt(config, log=LOGGER):
                 nameservers_ips.append(ns_ip)
         return nameservers_ips
 
-    def _update_dns(rrset, action, resolver):
+    def _update_dns(rrset, action, resolver, hidden_primary=None):
         """Updates DNS resource by adding or deleting resource."""
         algorithm = dns.name.from_text("{0}".format(config["TSIGKeyring"]["Algorithm"].lower()))
         dns_zone = dns.resolver.zone_for_name(rrset.name, resolver=resolver)
@@ -71,8 +71,12 @@ def get_crt(config, log=LOGGER):
         elif action == "delete":
             dns_update.delete(rrset.name, rrset)
         # Send DNS update request to main zone nameservers
+        if hidden_primary:
+            nameservers = [ hidden_primary ]
+        else:
+            nameservers = _get_authoritative_server_ips(dns_zone, resolver)
         response = None
-        for nameserver in _get_authoritative_server_ips(dns_zone, resolver):
+        for nameserver in nameservers:
             try:
                 response = dns.query.tcp(dns_update, nameserver, timeout=dns_timeout)
             # pylint: disable=broad-except
@@ -162,6 +166,8 @@ def get_crt(config, log=LOGGER):
 
     # explicitly disable the DNS suffix search list as the ACME server doesn't know it
     resolver.use_search_by_default = False
+
+    hidden_primary = config["DNS"].get("HiddenPrimary") or None
 
     log.info("Get private signature from account key.")
     accountkey = _openssl("rsa", ["-in", config["acmednstiny"]["AccountKeyFile"],
@@ -287,7 +293,7 @@ def get_crt(config, log=LOGGER):
         dnsrr_set = dns.rrset.from_text(dnsrr_domain, config["DNS"].getint("TTL"),
                                         "IN", "TXT", '"{0}"'.format(keydigest64))
         try:
-            _update_dns(dnsrr_set, "add", resolver)
+            _update_dns(dnsrr_set, "add", resolver, hidden_primary)
         except dns.exception.DNSException as exception:
             raise ValueError("Error updating DNS records: {0} : {1}"
                              .format(type(exception).__name__, str(exception))) from exception
@@ -339,7 +345,7 @@ def get_crt(config, log=LOGGER):
                     raise ValueError("Challenge for domain {0} did not pass: {1}".format(
                         domain, challenge_status))
         finally:
-            _update_dns(dnsrr_set, "delete", resolver)
+            _update_dns(dnsrr_set, "delete", resolver, hidden_primary)
 
     log.info("Request to finalize the order (all challenges have been completed)")
     csr_der = _base64(_openssl("req", ["-in", config["acmednstiny"]["CSRFile"],
